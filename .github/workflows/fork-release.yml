@@ -48,27 +48,6 @@ jobs:
       - name: Sync main with upstream
         run: gh repo sync "$REPO" --branch main
 
-      # Upstream's workflows target Blacksmith runners and upstream's
-      # infrastructure. A disabled workflow stays disabled across syncs, but one
-      # upstream adds later starts enabled, so everything else is switched off.
-      - name: Disable upstream workflows
-        env:
-          GH_TOKEN: ${{ github.token }}
-          KEEP: .github/workflows/fork-release.yml .github/workflows/release-desktop.yml
-        run: |
-          set -euo pipefail
-          gh api "repos/$REPO/actions/workflows?per_page=100" \
-            --jq '.workflows[] | select(.state == "active") | "\(.id) \(.path)"' |
-            while read -r id path; do
-              [[ "$path" == .github/workflows/* ]] || continue
-              [[ " $KEEP " == *" $path "* ]] && continue
-              echo "Disabling $path"
-              gh workflow disable "$id" -R "$REPO"
-              gh run list -R "$REPO" -w "$id" --json databaseId,status \
-                -q '.[] | select(.status != "completed") | .databaseId' |
-                xargs -r -n1 gh run cancel -R "$REPO" || true
-            done
-
       - name: Checkout main
         uses: actions/checkout@v6
         with:
@@ -151,6 +130,20 @@ jobs:
           set -euo pipefail
           git push --force "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" HEAD:refs/heads/fork-build
           echo "ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      # Upstream's workflows target Blacksmith runners and upstream's
+      # infrastructure. They are disabled here, but they live on main rather
+      # than the default branch, so the workflows API cannot see or disable one
+      # upstream adds later. Its runs, started by the sync push, are cancelled
+      # instead; this runs last so they have had time to queue.
+      - name: Cancel upstream workflow runs
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$REPO/actions/runs?per_page=100" \
+            --jq '.workflow_runs[] | select(.status != "completed" and .path != ".github/workflows/fork-release.yml") | .id' |
+            xargs -r -n1 gh run cancel -R "$REPO" || true
 
   typecheck:
     name: Typecheck
