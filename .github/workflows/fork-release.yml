@@ -136,7 +136,8 @@ jobs:
       # infrastructure. They are disabled here, but they live on main rather
       # than the default branch, so the workflows API cannot see or disable one
       # upstream adds later. Its runs, started by the sync push, are cancelled
-      # instead; this runs last so they have had time to queue.
+      # instead; this runs last so they have had time to queue. A plain cancel
+      # does not stick while a run waits for a runner label that never exists.
       - name: Cancel upstream workflow runs
         if: always()
         env:
@@ -144,7 +145,7 @@ jobs:
         run: |
           gh api "repos/$REPO/actions/runs?per_page=100" \
             --jq '.workflow_runs[] | select(.status != "completed" and .path != ".github/workflows/fork-release.yml") | .id' |
-            xargs -r -n1 gh run cancel -R "$REPO" || true
+            xargs -r -I{} gh api -X POST "repos/$REPO/actions/runs/{}/force-cancel" || true
 
   typecheck:
     name: Typecheck
