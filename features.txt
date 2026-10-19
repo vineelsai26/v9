@@ -1,0 +1,3 @@
+# Feature branches merged onto upstream main for every release, in this order.
+# One branch per line. Remove a line to drop a feature without deleting its branch.
+# If two features touch the same code, base one on the other and list only the top one.
