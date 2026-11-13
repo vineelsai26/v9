@@ -6,6 +6,7 @@ import * as Axiom from "@alchemy.run/axiom";
 import * as Cloudflare from "@alchemy.run/cloudflare";
 import * as Output from "alchemy/Output";
 import * as Cause from "effect/Cause";
+import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
@@ -28,7 +29,12 @@ const relayRecentSpansQuery = (dataset: string) =>
     `| limit 200`,
   ].join("\n");
 
-export const RelayObservability = Effect.gen(function* () {
+/** Without Axiom the relay keeps only Cloudflare's Worker logs and serves no mobile telemetry. */
+export const relayAxiomEnabledConfig = Config.Boolean("RELAY_AXIOM_ENABLED").pipe(
+  Config.withDefault(true),
+);
+
+const makeRelayObservability = Effect.gen(function* () {
   const { stage } = yield* Alchemy.Stack;
   const traces = yield* Axiom.Dataset("RelayTracesDataset", {
     name: relayResourceNameForStage("t3-code-relay-traces", stage),
@@ -113,6 +119,10 @@ export const RelayObservability = Effect.gen(function* () {
     mobileTelemetryIngestToken,
     mobileSourceMaps,
   } as const;
+});
+
+export const RelayObservability = Effect.gen(function* () {
+  return (yield* relayAxiomEnabledConfig) ? yield* makeRelayObservability : undefined;
 });
 
 const mobileSourceMapsBucketName = (stage: string) =>
