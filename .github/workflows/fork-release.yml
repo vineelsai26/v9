@@ -200,11 +200,16 @@ jobs:
       # The desktop build compiles the Linux browser secret helper.
       - run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
 
-      # No T3 Connect (Clerk/relay) config: that belongs to upstream's
-      # production deployment, so fork builds ship without T3 Connect.
+      # T3 Connect points at the fork's own relay (infra/relay, deployed by the
+      # relay job). With the variables unset, builds ship without T3 Connect.
+      # The bundled server embeds these at build time.
       - name: Build JS bundle
         env:
           T3CODE_TELEMETRY_CHANNEL: dev
+          T3CODE_CLERK_PUBLISHABLE_KEY: ${{ vars.T3CODE_CLERK_PUBLISHABLE_KEY }}
+          T3CODE_CLERK_JWT_TEMPLATE: ${{ vars.T3CODE_CLERK_JWT_TEMPLATE }}
+          T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: ${{ vars.T3CODE_CLERK_CLI_OAUTH_CLIENT_ID }}
+          T3CODE_RELAY_URL: ${{ vars.T3CODE_RELAY_URL }}
         run: vp run build:desktop
 
       # release-desktop.yml downloads this into `apps`.
@@ -227,10 +232,10 @@ jobs:
       ref: ${{ needs.prepare.outputs.ref }}
       release_channel: nightly
       relay_client_tracing: false
-      clerk_publishable_key: ""
-      clerk_jwt_template: ""
-      clerk_cli_oauth_client_id: ""
-      relay_url: ""
+      clerk_publishable_key: ${{ vars.T3CODE_CLERK_PUBLISHABLE_KEY }}
+      clerk_jwt_template: ${{ vars.T3CODE_CLERK_JWT_TEMPLATE }}
+      clerk_cli_oauth_client_id: ${{ vars.T3CODE_CLERK_CLI_OAUTH_CLIENT_ID }}
+      relay_url: ${{ vars.T3CODE_RELAY_URL }}
       label: Linux x64
       runner: ubuntu-24.04
       platform: linux
@@ -251,10 +256,10 @@ jobs:
       ref: ${{ needs.prepare.outputs.ref }}
       release_channel: nightly
       relay_client_tracing: false
-      clerk_publishable_key: ""
-      clerk_jwt_template: ""
-      clerk_cli_oauth_client_id: ""
-      relay_url: ""
+      clerk_publishable_key: ${{ vars.T3CODE_CLERK_PUBLISHABLE_KEY }}
+      clerk_jwt_template: ${{ vars.T3CODE_CLERK_JWT_TEMPLATE }}
+      clerk_cli_oauth_client_id: ${{ vars.T3CODE_CLERK_CLI_OAUTH_CLIENT_ID }}
+      relay_url: ${{ vars.T3CODE_RELAY_URL }}
       label: macOS arm64
       runner: macos-15
       platform: mac
@@ -273,10 +278,10 @@ jobs:
       ref: ${{ needs.prepare.outputs.ref }}
       release_channel: nightly
       relay_client_tracing: false
-      clerk_publishable_key: ""
-      clerk_jwt_template: ""
-      clerk_cli_oauth_client_id: ""
-      relay_url: ""
+      clerk_publishable_key: ${{ vars.T3CODE_CLERK_PUBLISHABLE_KEY }}
+      clerk_jwt_template: ${{ vars.T3CODE_CLERK_JWT_TEMPLATE }}
+      clerk_cli_oauth_client_id: ${{ vars.T3CODE_CLERK_CLI_OAUTH_CLIENT_ID }}
+      relay_url: ${{ vars.T3CODE_RELAY_URL }}
       label: Windows x64
       runner: windows-2025
       platform: win
@@ -286,9 +291,79 @@ jobs:
       resource_key: win32-x64
       cli_archive: false
 
+  # Keeps the fork's relay on the same revision as the clients being released,
+  # since upstream changes the client/relay protocol with main. Alchemy state
+  # lives in Cloudflare, so local and CI deploys share it. The relay database
+  # sits on a private network this runner cannot reach: when upstream adds a
+  # migration the job stops before changing anything, and a deploy from the
+  # LAN (see infra/relay/README.md) applies it, after which re-run this.
+  relay:
+    name: Deploy relay
+    needs: [prepare, typecheck]
+    if: needs.prepare.outputs.build == 'true' && vars.T3CODE_RELAY_URL != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    concurrency:
+      group: fork-relay-deploy
+      cancel-in-progress: false
+    env:
+      ALCHEMY_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: false
+
+      - run: vp install --filter=t3code-relay...
+
+      # One secret holds the whole deploy env file (Cloudflare token, Clerk
+      # secret, database URL, zones, tunnel); see infra/relay/.env.example.
+      - name: Write deploy environment
+        env:
+          RELAY_DEPLOY_ENV: ${{ secrets.RELAY_DEPLOY_ENV }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$RELAY_DEPLOY_ENV" ]]; then
+            echo "::error::Set the RELAY_DEPLOY_ENV secret, or unset T3CODE_RELAY_URL to release without T3 Connect."
+            exit 1
+          fi
+          umask 077
+          printf '%s\n' "$RELAY_DEPLOY_ENV" > "$RUNNER_TEMP/relay.env"
+          echo "T3CODE_RELAY_CLIENT_CONFIG_ENV=$RUNNER_TEMP/relay-client-config.env" >> "$RUNNER_TEMP/relay.env"
+
+      - name: Refuse pending migrations
+        working-directory: infra/relay
+        run: |
+          set -euo pipefail
+          ./node_modules/.bin/alchemy plan --stage prod --env-file "$RUNNER_TEMP/relay.env" --no-input | tee "$RUNNER_TEMP/plan.log"
+          if grep -q '\[MigrateRelayDatabase\] run' "$RUNNER_TEMP/plan.log"; then
+            echo "::error::This revision adds relay migrations, which need the private database. Deploy infra/relay from the LAN with this ref (${{ needs.prepare.outputs.ref }}), then re-run this job."
+            exit 1
+          fi
+
+      - name: Deploy
+        working-directory: infra/relay
+        run: ./node_modules/.bin/alchemy deploy --stage prod --env-file "$RUNNER_TEMP/relay.env" --yes --no-input
+
+      - name: Check health
+        env:
+          RELAY_URL: ${{ vars.T3CODE_RELAY_URL }}
+        run: curl -fsS --retry 5 --retry-delay 5 --retry-all-errors "$RELAY_URL/health"
+
   publish:
     name: Publish release
-    needs: [prepare, typecheck, linux_x64, mac_arm64, win_x64]
+    needs: [prepare, typecheck, relay, linux_x64, mac_arm64, win_x64]
+    # The relay job is skipped for builds without T3 Connect.
+    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') && needs.linux_x64.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:

@@ -32,9 +32,34 @@ git push -u origin feat/my-thing
 
 Then add `feat/my-thing` to `features.txt` on this branch.
 
+## T3 Connect
+
+`feat/custom-cloudflare-connect` lets `infra/relay` deploy to any Cloudflare account with any Postgres,
+without PlanetScale or Axiom. This fork's relay runs at `https://relay.vineelsai.com`, with its database on
+the docker VM behind the `docker-vm` tunnel (Fleet `stacks/t3-relay-db`). The release workflow's `relay` job
+redeploys it from each release's merged commit before publishing.
+
+Repository variables (public values baked into builds): `T3CODE_RELAY_URL`, `T3CODE_CLERK_PUBLISHABLE_KEY`,
+`T3CODE_CLERK_JWT_TEMPLATE`, and optionally `T3CODE_CLERK_CLI_OAUTH_CLIENT_ID`. Unset `T3CODE_RELAY_URL` to
+release without T3 Connect.
+
+Repository secret `RELAY_DEPLOY_ENV`: the relay's deploy env file (`infra/relay/.env.example` on that
+branch), including the Cloudflare token, Clerk secret key, and database URL.
+
+The runner cannot reach the database, so a release that adds relay migrations fails its `relay` job before
+deploying anything. Deploy that ref from the LAN, then re-run the job:
+
+```sh
+git switch --detach <ref from the failed job>
+cd infra/relay
+./node_modules/.bin/alchemy deploy --stage prod --env-file <your relay.env> --yes
+```
+
+`t3 connect login` on a machine without a browser needs a Clerk OAuth application with the device grant
+(`T3CODE_CLERK_CLI_OAUTH_CLIENT_ID`). Sign in from the desktop app otherwise.
+
 ## Limitations
 
-- No T3 Connect: its config belongs to upstream's production deployment. LAN and Tailscale work.
 - macOS builds are unsigned: clear quarantine with `xattr -cr "/Applications/T3 Code (Nightly).app"` after
   installing, and they cannot auto-update. Windows builds are unsigned and show a SmartScreen prompt.
 - SSH remote installs download the CLI from upstream releases by version, which do not exist for fork versions.
