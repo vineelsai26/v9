@@ -328,6 +328,16 @@ const make = Effect.gen(function* () {
 
 export const layer = Layer.effect(MobileTelemetry, make);
 
+/** Relays deployed without Axiom keep the route, which the API contract requires, and refuse it. */
+export const layerDisabled = Layer.succeed(
+  MobileTelemetry,
+  MobileTelemetry.of({
+    handle: Effect.fn("MobileTelemetry.handleDisabled")(function* () {
+      return HttpServerResponse.empty({ status: 404 });
+    }),
+  }),
+);
+
 /** Raw so the body is read once, capped. */
 export const layerApi = HttpApiBuilder.group(
   RelayApi,
