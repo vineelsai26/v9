@@ -283,13 +283,16 @@ jobs:
       clerk_cli_oauth_client_id: ${{ vars.T3CODE_CLERK_CLI_OAUTH_CLIENT_ID }}
       relay_url: ${{ vars.T3CODE_RELAY_URL }}
       label: Windows x64
-      runner: windows-2025
+      # As upstream: package on Linux, run the native checks on Windows.
+      # Packaging on a Windows runner exceeds the packaged payload file limit.
+      runner: ubuntu-24.04
+      verify_runner: windows-2025
       platform: win
       target: nsis
       arch: x64
       rust_target: x86_64-pc-windows-msvc
       resource_key: win32-x64
-      cli_archive: false
+      cli_archive: true
 
   # Keeps the fork's relay on the same revision as the clients being released,
   # since upstream changes the client/relay protocol with main. Alchemy state
