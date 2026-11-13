@@ -444,7 +444,7 @@ export const layer = Api.make(
     });
     const layerMobileTelemetryApi = mobileTelemetry
       ? yield* makeLayerMobileTelemetryApi(mobileTelemetry)
-      : Layer.empty;
+      : MobileTelemetry.layerApi.pipe(Layer.provide(MobileTelemetry.layerDisabled));
 
     const layerApp = Layer.mergeAll(
       layerRelayApi,

@@ -122,9 +122,15 @@ const RelayDatabaseTunnel = Config.all({
   port: Config.option(Config.Port("RELAY_DATABASE_TUNNEL_PORT")),
 }).pipe(Config.option);
 
+// Hyperdrive caps this by Workers plan; 20 is the most a non-Enterprise account may set.
+const RelayDatabaseConnectionLimit = Config.Int("RELAY_DATABASE_CONNECTION_LIMIT").pipe(
+  Config.withDefault(40),
+);
+
 export const RelayHyperdrive = Effect.gen(function* () {
   const origin = yield* RelayDatabaseOrigin;
   const tunnel = yield* RelayDatabaseTunnel;
+  const originConnectionLimit = yield* RelayDatabaseConnectionLimit;
   const credentials = {
     scheme: origin.scheme,
     database: origin.database,
@@ -135,7 +141,7 @@ export const RelayHyperdrive = Effect.gen(function* () {
     return yield* Cloudflare.Hyperdrive.Connection("RelayHyperdrive", {
       origin: { ...credentials, host: origin.host, port: origin.port },
       caching: { disabled: true },
-      originConnectionLimit: 40,
+      originConnectionLimit,
     });
   }
   const host = Option.getOrElse(tunnel.value.host, () => origin.host);
@@ -143,6 +149,10 @@ export const RelayHyperdrive = Effect.gen(function* () {
     type: "tcp",
     appProtocol: "postgresql",
     tcpPort: Option.getOrElse(tunnel.value.port, () => origin.port),
+    // `sslmode=require` means encrypted but unverified, as for self-signed servers.
+    tlsSettings: {
+      certVerificationMode: origin.tls === "verify-full" ? "verify_full" : "disabled",
+    },
     host: isIpv4(host)
       ? { ipv4: host, network: { tunnelId: tunnel.value.tunnelId } }
       : { hostname: host, resolverNetwork: { tunnelId: tunnel.value.tunnelId } },
@@ -150,7 +160,7 @@ export const RelayHyperdrive = Effect.gen(function* () {
   return yield* Cloudflare.Hyperdrive.Connection("RelayHyperdrive", {
     origin: { ...credentials, serviceId: service.serviceId },
     caching: { disabled: true },
-    originConnectionLimit: 40,
+    originConnectionLimit,
   });
 });
 
