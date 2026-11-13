@@ -114,8 +114,11 @@ const ApnsDeliveryJobSigningSecret = Alchemy.makeRandom("ApnsDeliveryJobSigningS
 export class Api extends Cloudflare.Worker<Api, {}>()("Api") {}
 
 export const layer = Api.make(
-  RelayDeploymentConfig.pipe(
-    Effect.map(({ relayPublicDomain }) => ({
+  Effect.all([
+    RelayDeploymentConfig,
+    Config.String("RELAY_PLACEMENT_REGION").pipe(Config.withDefault("aws:us-west-2")),
+  ]).pipe(
+    Effect.map(([{ relayPublicDomain }, placementRegion]) => ({
       main: import.meta.filename,
       compatibility: {
         date: "2026-05-22",
@@ -123,8 +126,9 @@ export const layer = Api.make(
       },
       // Requests run several Postgres queries in sequence. At the user's edge
       // each one paid the round trip to the database (~300 ms from JNB); next
-      // to PlanetScale `us-west` the request pays that distance once.
-      placement: { region: "aws:us-west-2" },
+      // to the database the request pays that distance once. Set
+      // RELAY_PLACEMENT_REGION to the cloud region nearest your database.
+      placement: { region: placementRegion },
       domain: relayPublicDomain,
     })),
     Effect.orDie,
@@ -216,14 +220,18 @@ export const layer = Api.make(
         period: MobileTelemetry.MOBILE_TELEMETRY_RATE_LIMIT.periodSeconds,
       },
     });
-    const mobileSourceMaps = yield* Cloudflare.R2.ReadBucket(observability.mobileSourceMaps);
-    const mobileTelemetryToken = yield* observability.mobileTelemetryIngestToken.token;
-    const mobileTracesUrl = yield* observability.traces.otelTracesEndpoint;
-    const mobileTracesDataset = yield* observability.traces.name;
-    const mobileLogsUrl = yield* observability.mobileLogs.otelLogsEndpoint;
-    const mobileLogsDataset = yield* observability.mobileLogs.name;
-    const mobileMetricsUrl = yield* observability.mobileMetrics.otelMetricsEndpoint;
-    const mobileMetricsDataset = yield* observability.mobileMetrics.name;
+    const mobileTelemetry = observability
+      ? {
+          sourceMaps: yield* Cloudflare.R2.ReadBucket(observability.mobileSourceMaps),
+          token: yield* observability.mobileTelemetryIngestToken.token,
+          tracesUrl: yield* observability.traces.otelTracesEndpoint,
+          tracesDataset: yield* observability.traces.name,
+          logsUrl: yield* observability.mobileLogs.otelLogsEndpoint,
+          logsDataset: yield* observability.mobileLogs.name,
+          metricsUrl: yield* observability.mobileMetrics.otelMetricsEndpoint,
+          metricsDataset: yield* observability.mobileMetrics.name,
+        }
+      : undefined;
 
     const alchemyRuntimeContext: Alchemy.BaseRuntimeContext = yield* Cloudflare.Worker;
 
@@ -373,56 +381,70 @@ export const layer = Api.make(
       allowEndpoint: allowWith(hookEndpointRateLimit),
     });
 
-    // `fetch` rebuilds its layers per request; the source map cache must outlive one.
-    const mobileSourceMapLookups = yield* MobileTelemetry.SourceMaps.pipe(
-      Effect.provide(MobileTelemetry.layerSourceMaps),
-      Effect.provideService(MobileTelemetry.SourceMapObjects, {
-        get: (key) =>
-          mobileSourceMaps.get(key).pipe(
-            Effect.map((object) =>
-              object === null
-                ? undefined
-                : {
-                    size: object.size,
-                    text: object.text().pipe(
-                      Effect.provideService(Alchemy.RuntimeContext, alchemyRuntimeContext),
-                      Effect.mapError(
-                        (cause) => new MobileTelemetry.SourceMapObjectError({ key, cause }),
+    const makeLayerMobileTelemetryApi = Effect.fn("RelayWorker.makeMobileTelemetryApi")(function* (
+      telemetry: NonNullable<typeof mobileTelemetry>,
+    ) {
+      // `fetch` rebuilds its layers per request; the source map cache must outlive one.
+      const mobileSourceMapLookups = yield* MobileTelemetry.SourceMaps.pipe(
+        Effect.provide(MobileTelemetry.layerSourceMaps),
+        Effect.provideService(MobileTelemetry.SourceMapObjects, {
+          get: (key) =>
+            telemetry.sourceMaps.get(key).pipe(
+              Effect.map((object) =>
+                object === null
+                  ? undefined
+                  : {
+                      size: object.size,
+                      text: object.text().pipe(
+                        Effect.provideService(Alchemy.RuntimeContext, alchemyRuntimeContext),
+                        Effect.mapError(
+                          (cause) => new MobileTelemetry.SourceMapObjectError({ key, cause }),
+                        ),
                       ),
-                    ),
+                    },
+              ),
+              Effect.provideService(Alchemy.RuntimeContext, alchemyRuntimeContext),
+              Effect.mapError((cause) => new MobileTelemetry.SourceMapObjectError({ key, cause })),
+            ),
+        }),
+      );
+      const layerMobileTelemetry = MobileTelemetry.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.effect(
+              MobileTelemetry.MobileTelemetrySettings,
+              Effect.gen(function* () {
+                return MobileTelemetry.MobileTelemetrySettings.of({
+                  axiomToken: yield* telemetry.token,
+                  destinations: {
+                    traces: {
+                      url: yield* telemetry.tracesUrl,
+                      dataset: yield* telemetry.tracesDataset,
+                    },
+                    logs: { url: yield* telemetry.logsUrl, dataset: yield* telemetry.logsDataset },
+                    metrics: {
+                      url: yield* telemetry.metricsUrl,
+                      dataset: yield* telemetry.metricsDataset,
+                    },
                   },
+                });
+              }),
             ),
-            Effect.provideService(Alchemy.RuntimeContext, alchemyRuntimeContext),
-            Effect.mapError((cause) => new MobileTelemetry.SourceMapObjectError({ key, cause })),
-          ),
-      }),
-    );
-    const layerMobileTelemetry = MobileTelemetry.layer.pipe(
-      Layer.provide(
-        Layer.mergeAll(
-          Layer.effect(
-            MobileTelemetry.MobileTelemetrySettings,
-            Effect.gen(function* () {
-              return MobileTelemetry.MobileTelemetrySettings.of({
-                axiomToken: yield* mobileTelemetryToken,
-                destinations: {
-                  traces: { url: yield* mobileTracesUrl, dataset: yield* mobileTracesDataset },
-                  logs: { url: yield* mobileLogsUrl, dataset: yield* mobileLogsDataset },
-                  metrics: { url: yield* mobileMetricsUrl, dataset: yield* mobileMetricsDataset },
-                },
-              });
+            Layer.succeed(MobileTelemetry.MobileTelemetryRateLimiter, {
+              allow: allowWith(
+                mobileTelemetryRateLimit,
+                "relay.mobile_telemetry.rate_limiter_failed_open",
+              ),
             }),
+            Layer.succeed(MobileTelemetry.SourceMaps, mobileSourceMapLookups),
           ),
-          Layer.succeed(MobileTelemetry.MobileTelemetryRateLimiter, {
-            allow: allowWith(
-              mobileTelemetryRateLimit,
-              "relay.mobile_telemetry.rate_limiter_failed_open",
-            ),
-          }),
-          Layer.succeed(MobileTelemetry.SourceMaps, mobileSourceMapLookups),
         ),
-      ),
-    );
+      );
+      return MobileTelemetry.layerApi.pipe(Layer.provide(layerMobileTelemetry));
+    });
+    const layerMobileTelemetryApi = mobileTelemetry
+      ? yield* makeLayerMobileTelemetryApi(mobileTelemetry)
+      : MobileTelemetry.layerApi.pipe(Layer.provide(MobileTelemetry.layerDisabled));
 
     const layerApp = Layer.mergeAll(
       layerRelayApi,
@@ -430,7 +452,7 @@ export const layer = Api.make(
         Layer.provide(HookForwarder.layer),
         Layer.provide(layerHookRateLimiter),
       ),
-      MobileTelemetry.layerApi.pipe(Layer.provide(layerMobileTelemetry)),
+      layerMobileTelemetryApi,
     ).pipe(
       Layer.provideMerge(RelayHttpApi.layerClientAuth),
       Layer.provideMerge(RelayHttpApi.layerDpopClientAuth),
@@ -574,11 +596,13 @@ export const layer = Api.make(
         Layer.provideMerge(
           Layer.unwrap(
             Effect.map(RelayObservability, (observability) =>
-              Axiom.Telemetry({
-                serviceName: "t3code-relay",
-                token: observability.workerIngestToken,
-                traces: observability.traces,
-              }),
+              observability
+                ? Axiom.Telemetry({
+                    serviceName: "t3code-relay",
+                    token: observability.workerIngestToken,
+                    traces: observability.traces,
+                  })
+                : Layer.empty,
             ),
           ),
         ),
