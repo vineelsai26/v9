@@ -3,8 +3,9 @@ name: Fork Release
 # Syncs main with pingdotgg/t3code, merges the branches listed in features.txt
 # on top, and publishes a nightly-versioned GitHub release that fork desktop
 # installs update from. Upstream's CI has already tested main, so this only
-# proves the overlay merges and typechecks, then packages it with upstream's
-# own release-desktop.yml, called from main so the build steps never fork.
+# merges the overlay, packages it with upstream's own release-desktop.yml
+# (called from main so the build steps never fork), redeploys the relay, and
+# publishes. It is the only workflow that runs in this repository.
 
 on:
   schedule:
@@ -132,45 +133,22 @@ jobs:
           git push --force "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" HEAD:refs/heads/fork-build
           echo "ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      # Upstream's workflows target Blacksmith runners and upstream's
-      # infrastructure. They are disabled here, but they live on main rather
-      # than the default branch, so the workflows API cannot see or disable one
-      # upstream adds later. Its runs, started by the sync push, are cancelled
-      # instead; this runs last so they have had time to queue. A plain cancel
-      # does not stick while a run waits for a runner label that never exists.
-      - name: Cancel upstream workflow runs
+      # Upstream's workflows target upstream's runners and infrastructure, and
+      # the sync push starts them. A workflow is visible to the API once it has
+      # run, so each one is disabled after its first push and that first run is
+      # cancelled. This runs last so those runs have had time to queue; a plain
+      # cancel does not stick while a run waits for a runner that never exists.
+      - name: Disable upstream workflows
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          gh api "repos/$REPO/actions/workflows?per_page=100" \
+            --jq '.workflows[] | select(.state == "active" and .path != ".github/workflows/fork-release.yml") | .id' |
+            xargs -r -I{} gh api -X PUT "repos/$REPO/actions/workflows/{}/disable" || true
           gh api "repos/$REPO/actions/runs?per_page=100" \
             --jq '.workflow_runs[] | select(.status != "completed" and .path != ".github/workflows/fork-release.yml") | .id' |
             xargs -r -I{} gh api -X POST "repos/$REPO/actions/runs/{}/force-cancel" || true
-
-  typecheck:
-    name: Typecheck
-    needs: prepare
-    if: needs.prepare.outputs.build == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.prepare.outputs.ref }}
-          sparse-checkout: |
-            /*
-            !/.repos/
-          sparse-checkout-cone-mode: false
-
-      - uses: voidzero-dev/setup-vp@v1
-        with:
-          node-version-file: package.json
-          cache: true
-          run-install: true
-
-      - run: vp run --filter @t3tools/desktop ensure:electron
-
-      - run: vp run typecheck
 
   bundle:
     name: Build JS bundle
@@ -302,7 +280,9 @@ jobs:
   # LAN (see infra/relay/README.md) applies it, after which re-run this.
   relay:
     name: Deploy relay
-    needs: [prepare, typecheck]
+    # After every platform builds, so a failed build never leaves the relay
+    # ahead of the published clients.
+    needs: [prepare, linux_x64, mac_arm64, win_x64]
     if: needs.prepare.outputs.build == 'true' && vars.T3CODE_RELAY_URL != ''
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -364,7 +344,7 @@ jobs:
 
   publish:
     name: Publish release
-    needs: [prepare, typecheck, relay, linux_x64, mac_arm64, win_x64]
+    needs: [prepare, relay, linux_x64, mac_arm64, win_x64]
     # The relay job is skipped for builds without T3 Connect.
     if: ${{ !cancelled() && !contains(needs.*.result, 'failure') && needs.linux_x64.result == 'success' }}
     runs-on: ubuntu-24.04

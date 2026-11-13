@@ -12,9 +12,12 @@ A personal build of [T3 Code](https://github.com/pingdotgg/t3code) with extra fe
 ## Releases
 
 [`fork-release.yml`](.github/workflows/fork-release.yml) runs daily and on demand. It syncs `main`,
-merges each branch in [`features.txt`](features.txt) in order, typechecks, and publishes a nightly-versioned
-prerelease for Linux x64, macOS arm64 and Windows x64. The daily run skips the build when nothing changed;
-a manual run always builds. A feature that no longer merges fails the run and names the branch.
+merges each branch in [`features.txt`](features.txt) in order, builds, redeploys the relay, and publishes a
+nightly-versioned prerelease for Linux x64, macOS arm64 and Windows x64. The daily run skips the build when
+nothing changed; a manual run always builds. A feature that no longer merges fails the run and names the branch.
+
+It is the only workflow that runs here. Upstream's workflows arrive with `main` and are disabled; one upstream
+adds later gets its first run cancelled and is disabled by the next release run.
 
 Installed builds update from this repository's releases. Keep the app's update channel on Nightly.
 
